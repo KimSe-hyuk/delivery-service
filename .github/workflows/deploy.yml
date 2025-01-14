@@ -50,4 +50,4 @@ jobs:
         run: |
           IMAGE_TAG=${{ github.sha }}
           IMAGE_URI=879381276515.dkr.ecr.ap-northeast-2.amazonaws.com/rider-service:${IMAGE_TAG}
-          kubectl set image deployment/rider-service rider-service=$IMAGE_URI --record
+          kubectl set image deployment/rider-service rider-service=$IMAGE_URI  
