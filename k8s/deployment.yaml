@@ -35,10 +35,7 @@ spec:
             # AWS 설정
             - name: AWS_REGION
               value: ap-northeast-2
-            - name: AWS_ACCESS_KEY_ID
-              value: your_access_key_id
-            - name: AWS_SECRET_ACCESS_KEY
-              value: your_secret_access_key
+
 
             # SQS 설정
             - name: AWS_SQS_QUEUE_NAME_CHAT
@@ -49,3 +46,14 @@ spec:
               value: https://sqs.ap-northeast-2.amazonaws.com/879381276515/chat.fifo
             - name: AWS_SQS_QUEUE_URL_DELIVERY_STATUS
               value: https://sqs.ap-northeast-2.amazonaws.com/879381276515/deliveryStatus
+
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_SECRET_ACCESS_KEY
