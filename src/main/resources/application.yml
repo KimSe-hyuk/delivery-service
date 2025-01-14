@@ -1,0 +1,31 @@
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: ${REDIS_TIMEOUT:10000}
+      database: ${REDIS_DATABASE:0}
+  session:
+    redis:
+      repository-type: ${SESSION_REDIS_REPOSITORY_TYPE:indexed}
+      namespace: ${SESSION_REDIS_NAMESPACE:my-session}
+    timeout: ${SESSION_TIMEOUT:600s}
+    flush-mode: ${SESSION_FLUSH_MODE:immediate}
+
+  application:
+    name: delivery-service
+  cloud:
+    aws:
+      region:
+        static: ${AWS_REGION:ap-northeast-2}
+      credentials:
+        access-key: ${AWS_ACCESS_KEY_ID}
+        secret-key: ${AWS_SECRET_ACCESS_KEY}
+      sqs:
+        queue-name-chat: ${AWS_SQS_QUEUE_NAME_CHAT:chat.fifo}
+        queue-name-deliveryStatus: ${AWS_SQS_QUEUE_NAME_DELIVERY_STATUS:deliveryStatus}
+        queue-url-chat: ${AWS_SQS_QUEUE_URL_CHAT:https://sqs.ap-northeast-2.amazonaws.com/879381276515/chat.fifo}
+        queue-url-deliveryStatus: ${AWS_SQS_QUEUE_URL_DELIVERY_STATUS:https://sqs.ap-northeast-2.amazonaws.com/879381276515/deliveryStatus}
+
+server:
+  port: ${SERVER_PORT:7770}

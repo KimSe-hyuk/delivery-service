@@ -1,4 +1,4 @@
-package com.example.deliveryservice.comfig;
+package com.example.delivery.config;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
