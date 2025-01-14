@@ -1,0 +1,53 @@
+name: CI/CD for EKS
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 코드 체크아웃
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # 2. AWS CLI 인증 설정
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-2
+
+      # 3. ECR 리포지토리 생성 (존재하지 않을 경우)
+      - name: Create ECR Repository
+        run: |
+          aws ecr describe-repositories --repository-names rider-service || \
+          aws ecr create-repository --repository-name rider-service
+
+      # 4. Configure kubectl (Kubeconfig 설정)
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --region ap-northeast-2 --name polar-kim
+
+      # 5. ECR 로그인
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # 6. Docker 이미지 빌드 및 푸시
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          IMAGE_URI=879381276515.dkr.ecr.ap-northeast-2.amazonaws.com/rider-service:${IMAGE_TAG}
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+
+      # 7. Kubernetes Deployment 업데이트
+      - name: Update Kubernetes Deployment
+        run: |
+          IMAGE_TAG=${{ github.sha }}
+          IMAGE_URI=879381276515.dkr.ecr.ap-northeast-2.amazonaws.com/rider-service:${IMAGE_TAG}
+          kubectl set image deployment/rider-service rider-service=$IMAGE_URI --record

@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rider-service
+  labels:
+    app: rider-service
+
+spec:
+  replicas: 1  # 필요한 경우 적절히 스케일링
+  selector:
+    matchLabels:
+      app: rider-service
+  template:
+    metadata:
+      labels:
+        app: rider-service
+    spec:
+      containers:
+        - name: rider-service
+          # ECR 이미지 주소 (최신 이미지 사용)
+          image: 879381276515.dkr.ecr.ap-northeast-2.amazonaws.com/rider-service:latest
+          # Always로 설정하여 항상 최신 이미지를 가져옴
+          imagePullPolicy: Always
+          lifecycle:
+            preStop:
+              exec:
+                # 종료 전 5초 대기
+                command: [ "sh", "-c", "sleep 5" ]
+          ports:
+            - containerPort: 7710  # 애플리케이션 노출 포트
+          env:
+            # Redis 설정
+            - name: REDIS_HOST
+              value: redis-service
+            # AWS 설정
+            - name: AWS_REGION
+              value: ap-northeast-2
+            - name: AWS_ACCESS_KEY_ID
+              value: your_access_key_id
+            - name: AWS_SECRET_ACCESS_KEY
+              value: your_secret_access_key
+
+            # SQS 설정
+            - name: AWS_SQS_QUEUE_NAME_CHAT
+              value: chat.fifo
+            - name: AWS_SQS_QUEUE_NAME_DELIVERY_STATUS
+              value: deliveryStatus
+            - name: AWS_SQS_QUEUE_URL_CHAT
+              value: https://sqs.ap-northeast-2.amazonaws.com/879381276515/chat.fifo
+            - name: AWS_SQS_QUEUE_URL_DELIVERY_STATUS
+              value: https://sqs.ap-northeast-2.amazonaws.com/879381276515/deliveryStatus
