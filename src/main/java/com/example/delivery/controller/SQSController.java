@@ -25,6 +25,28 @@ public class SQSController {
         sqsService.sendMessage(orderRequestDTO.getUserId(), orderRequestDTO.getMessage(),orderRequestDTO.getStatus(),orderRequestDTO.getOrderId(),riderId);
         return "Message sent successfully for userId: " + orderRequestDTO.getUserId();
     }
+    // 유저아이디와 상태 따른 내역 받기
+    @GetMapping("/userId")
+    public List<OrderResponseDTO> receiveUserIdMessages(@RequestParam String userId, @RequestParam String status) {
+        return sqsService.getOrdersByUserId(userId, status);
+    }
+
+    //라이더와 상태 따른 내역 받기
+    @GetMapping("/getRiderOrders")
+    public List<OrderResponseDTO> receiveRiderOrderList(@RequestParam String riderId, @RequestParam String status) {
+        return sqsService.getDeliveriesByRiderId(riderId, status);
+    }
+    // 유저아이디  따른 내역 받기
+    @GetMapping("/userIdLIst")
+    public List<OrderResponseDTO>  receiveUserIdMessages(@RequestParam String userId) {
+        return sqsService.getUserIdList(userId);
+    }
+
+    //라이더와  따른 내역 받기
+    @GetMapping("/getRiderOrdersList")
+    public List<OrderResponseDTO>  receiveRiderIdMessage(@RequestParam String riderId) {
+        return sqsService.getRiderIdList(riderId);
+    }
 
     // 특정 주문 상태에 따른 내역 받기
     @GetMapping("/receive")
@@ -37,19 +59,22 @@ public class SQSController {
     public List<OrderResponseDTO> receiveOrderIdMessages(@RequestParam String orderId) {
         return sqsService.getOrdersByOrderId(orderId);
     }
+
+
  // 특정 주문번호와 상태에 따른 내역 받기
     @GetMapping("/orderIdStatus")
     public List<OrderResponseDTO> receiveOrderIdStatusMessages(@RequestParam String orderId, @RequestParam String status) {
-        return sqsService.getOrderByStatusAndId(orderId,status);
+        return sqsService.getOrdersByStatusAndId(orderId,status);
     }
-    //라이더에 따른 내역 받기
-    @GetMapping("/getRiderOrders")
-    public List<OrderResponseDTO> receiveAllOrderList(@RequestParam String riderId) {
-        return sqsService.getOrdersByOrderId(riderId);
-    }
+
     // 모든 레디스에 저장된 order 데이터 가져오기
     @GetMapping("/getAllOrder")
     public List<OrderResponseDTO> receiveAllOrderList(){
         return sqsService.getAllOrders();
+    }
+    @GetMapping("/redisDelete")
+    public void deleteRedis(){
+        sqsService.deleteRedis();
+        System.out.println("Redis 데이터베이스의 모든 키가 삭제되었습니다.");
     }
 }

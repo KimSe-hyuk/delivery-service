@@ -4,6 +4,7 @@ import com.example.delivery.dto.OrderResponseDTO;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Service;
@@ -14,236 +15,322 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+
 @Service
 @RequiredArgsConstructor
 public class SQSService {
 
+    private final ChatProducer chatProducer;
     private final RedisTemplate<String, Object> redisTemplate;
     private final SqsClient sqsClient;
 
     @Value("${spring.cloud.aws.sqs.queue-url-deliveryStatus}")
     private String queueUrl;
+    private final RedisConnectionFactory connectionFactory;
 
     private static final String REDIS_ORDER_STATUSES_KEY = "orderStatuses";
     private static final String REDIS_ORDER_BODIES_KEY = "orderBodies";
     private static final String REDIS_ORDER_USER_IDS_KEY = "orderUsers";
     private static final String REDIS_ORDER_RIDER_IDS_KEY = "riderUsers";
 
-    // 메시지 전송
+    /**
+     * SQS에 메시지를 전송하는 메서드입니다.
+     * 주로 주문 상태 업데이트, 사용자 알림 등에 사용됩니다.
+     */
     public void sendMessage(String userId, String message, String status, String orderId, String riderId) {
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        String timestamp = getCurrentTimestamp();
 
         Map<String, MessageAttributeValue> messageAttributes = buildMessageAttributes(status, timestamp, orderId, userId, riderId);
 
-        SendMessageRequest request = SendMessageRequest.builder()
+        sqsClient.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .messageBody(message)
                 .messageAttributes(messageAttributes)
-                .build();
+                .build());
 
-        sqsClient.sendMessage(request);
-        System.out.printf("Message %s sent for user %s with status %s at %s orderID %s riderId %s%n", message, userId, status, timestamp, orderId, riderId);
+        System.out.printf("Message sent: userId=%s, status=%s, orderId=%s, riderId=%s, timestamp=%s%n", userId, status, orderId, riderId, timestamp);
     }
 
+    /**
+     * SQS로부터 메시지를 수신하여 처리하는 메서드입니다.
+     * 메시지에 포함된 주문 정보를 기반으로 Redis에 데이터를 저장하거나 삭제합니다.
+     */
     @SqsListener("${spring.cloud.aws.sqs.queue-name-deliveryStatus}")
     public void processMessage(@Payload Message message) {
-        System.out.println("SQS 메시지: " + message);
         Map<String, MessageAttributeValue> attributes = message.messageAttributes();
-
-        // 속성이 누락되었거나 null일 경우 디폴트 값 사용
         String orderId = getAttributeValue(attributes, "orderId", "defaultOrderId");
-        String timestamp = getAttributeValue(attributes, "timestamp", LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+        String timestamp = getAttributeValue(attributes, "timestamp", getCurrentTimestamp());
         String status = getAttributeValue(attributes, "status", "defaultStatus");
         String userId = getAttributeValue(attributes, "userId", "defaultUserId");
-        String riderId = getAttributeValue(attributes, "riderId", "defaultRiderId"); // riderId 추가
-        String messageBody = message.body();
+        String riderId = getAttributeValue(attributes, "riderId", "defaultRiderId");
 
-        System.out.printf("orderId: %s, timestamp: %s, status: %s, userId: %s, riderId: %s, messageBody: %s%n", orderId, timestamp, status, userId, riderId, messageBody);
+        System.out.printf("Processing SQS message: orderId=%s, status=%s, userId=%s, riderId=%s%n", orderId, status, userId, riderId);
 
-        String currentStatus = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, orderId);
-        String currentRiderId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_RIDER_IDS_KEY, orderId);
-
-        // 상태가 동일하고 riderId도 동일하면 처리하지 않고 종료
-        if (status.equals(currentStatus) && riderId.equals(currentRiderId)) {
-            System.out.printf("주문 ID %s는 동일한 상태와 riderId입니다. 업데이트를 건너뜁니다.%n", orderId);
+        if ("배달끝".equals(status)) {
+            chatProducer.deleteChatMessagesFromRedis(orderId);
+            deleteOrderData(orderId);
+            deleteMessage(message.receiptHandle());
             return;
         }
 
-        // 상태가 변경된 경우 기존 상태 및 riderId 제거
-        if (currentStatus != null) {
-            String oldZsetKey = "orderTimestamps:" + currentStatus;
-            redisTemplate.opsForZSet().remove(oldZsetKey, orderId);
-            redisTemplate.opsForHash().delete(REDIS_ORDER_STATUSES_KEY, orderId);
-            redisTemplate.opsForHash().delete(REDIS_ORDER_RIDER_IDS_KEY, orderId); // 기존 riderId 제거
-            System.out.printf("주문 ID %s의 상태가 %s에서 %s로 업데이트되었습니다.%n", orderId, currentStatus, status);
+        updateOrderData(orderId, status, userId, riderId, timestamp, message.body());
+        deleteMessage(message.receiptHandle());
+    }
+
+    /**
+     * Redis에 주문 데이터를 업데이트하는 메서드입니다.
+     * 기존 상태가 변경된 경우 데이터를 갱신하며, 새로운 상태로 추가합니다.
+     */
+    private void updateOrderData(String orderId, String status, String userId, String riderId, String timestamp, String messageBody) {
+        String currentStatus = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, orderId);
+        String currentRiderId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_RIDER_IDS_KEY, orderId);
+
+        if (status.equals(currentStatus) && riderId.equals(currentRiderId)) {
+            System.out.printf("Order %s already up-to-date. Skipping.%n", orderId);
+            return;
         }
 
-        // 새로운 상태로 추가
-        double score = LocalDateTime.parse(timestamp, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
-                .toEpochSecond(ZoneOffset.UTC);
-        String newZsetKey = "orderTimestamps:" + status;
-        redisTemplate.opsForZSet().add(newZsetKey, orderId, score);
+        if (currentStatus != null) {
+            redisTemplate.opsForZSet().remove("orderTimestamps:" + currentStatus, orderId);
+            redisTemplate.opsForHash().delete(REDIS_ORDER_STATUSES_KEY, orderId);
+            redisTemplate.opsForHash().delete(REDIS_ORDER_RIDER_IDS_KEY, orderId);
+        }
+
+        double time = LocalDateTime.parse(timestamp, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")).toEpochSecond(ZoneOffset.UTC);
+        redisTemplate.opsForZSet().add("orderTimestamps:" + status, orderId, time);
+
         redisTemplate.opsForHash().put(REDIS_ORDER_STATUSES_KEY, orderId, status);
         redisTemplate.opsForHash().put(REDIS_ORDER_BODIES_KEY, orderId, messageBody);
         redisTemplate.opsForHash().put(REDIS_ORDER_USER_IDS_KEY, orderId, userId);
 
-        // riderId도 상태에 따라 업데이트
         if ("배달중".equals(status) || "배달완료".equals(status)) {
             redisTemplate.opsForHash().put(REDIS_ORDER_RIDER_IDS_KEY, orderId, riderId);
         }
 
-        deleteMessage(message.receiptHandle());
-        System.out.printf("주문 ID %s의 상태가 %s로 업데이트되었습니다. (userId: %s, riderId: %s)%n", orderId, status, userId, riderId);
+        setRedisKeyExpirationForOrderId(REDIS_ORDER_STATUSES_KEY, orderId);  // 상태는 1일
+        setRedisKeyExpirationForOrderId(REDIS_ORDER_BODIES_KEY, orderId);    // 메시지 본문은 7일
+        setRedisKeyExpirationForOrderId(REDIS_ORDER_USER_IDS_KEY, orderId);  // 사용자 ID는 7일
+        setRedisKeyExpirationForOrderId(REDIS_ORDER_RIDER_IDS_KEY, orderId); // 라이더 ID는 7일
+
+
+        System.out.printf("Order %s updated in Redis with status=%s and riderId=%s%n", orderId, status, riderId);
+
+    }
+
+    /**
+     * Redis에서 특정 주문 데이터를 삭제하는 메서드입니다.
+     * 주로 "배달끝" 상태인 경우 호출됩니다.
+     */
+    private void deleteOrderData(String orderId) {
+        redisTemplate.opsForHash().delete(REDIS_ORDER_STATUSES_KEY, orderId);
+        redisTemplate.opsForHash().delete(REDIS_ORDER_BODIES_KEY, orderId);
+        redisTemplate.opsForHash().delete(REDIS_ORDER_USER_IDS_KEY, orderId);
+        redisTemplate.opsForHash().delete(REDIS_ORDER_RIDER_IDS_KEY, orderId);
+
+        redisTemplate.opsForZSet().remove("orderTimestamps:배달끝", orderId);
+
+        System.out.printf("Deleted Redis data for orderId=%s%n", orderId);
+    }
+
+    /**
+     * SQS 메시지를 삭제하는 메서드입니다.
+     * 메시지 처리가 완료된 후 호출됩니다.
+     */
+    private void deleteMessage(String receiptHandle) {
+        sqsClient.deleteMessage(DeleteMessageRequest.builder()
+                .queueUrl(queueUrl)
+                .receiptHandle(receiptHandle)
+                .build());
+        System.out.printf("Deleted SQS message: receiptHandle=%s%n", receiptHandle);
+    }
+
+    /**
+     * 메시지 속성을 생성하는 메서드입니다.
+     * SQS에 전송될 메시지의 메타정보를 포함합니다.
+     */
+    private Map<String, MessageAttributeValue> buildMessageAttributes(String status, String timestamp, String orderId, String userId, String riderId) {
+        return Map.of(
+                "status", MessageAttributeValue.builder().dataType("String").stringValue(status).build(),
+                "timestamp", MessageAttributeValue.builder().dataType("String").stringValue(timestamp).build(),
+                "orderId", MessageAttributeValue.builder().dataType("String").stringValue(orderId).build(),
+                "userId", MessageAttributeValue.builder().dataType("String").stringValue(userId).build(),
+                "riderId", MessageAttributeValue.builder().dataType("String").stringValue(riderId).build()
+        );
+    }
+
+    /**
+     * 메시지 속성에서 값을 안전하게 가져오는 메서드입니다.
+     * 속성이 존재하지 않을 경우 디폴트 값을 반환합니다.
+     */
+    private String getAttributeValue(Map<String, MessageAttributeValue> attributes, String key, String defaultValue) {
+        MessageAttributeValue value = attributes.get(key);
+        return value != null && value.stringValue() != null ? value.stringValue() : defaultValue;
+    }
+
+    // Redis 키의 만료 시간을 설정하는 메서드 (orderId 별로)
+    private void setRedisKeyExpirationForOrderId(String key, String orderId) {
+        String redisKey = key + ":" + orderId;  // orderId를 포함한 키
+        redisTemplate.expire(redisKey, 1, TimeUnit.DAYS);  // orderId별로 만료 시간 설정
+    }
+
+    /**
+     * 현재 시간을 yyyy-MM-dd HH:mm:ss 형식의 문자열로 반환하는 메서드입니다.
+     */
+    private String getCurrentTimestamp() {
+        return LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+    }
+
+    /**
+     * Redis에서 특정 상태와 주문 데이터를 오래된 순서대로 조회하는 메서드입니다.
+     */
+    public List<OrderResponseDTO> getOrdersByStatusAndId(String statusFilter, String orderId) {
+        // ZSet에서 상태에 해당하는 모든 데이터를 오래된 순서대로 가져오기
+        Set<Object> orderIds = redisTemplate.opsForZSet().range("orderTimestamps:" + statusFilter, 0, -1);
+        if (orderIds == null || orderIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 오래된 순서로 반환된 ID 중에서 특정 orderId를 확인
+        return orderIds.stream()
+                .filter(id -> id.equals(orderId))
+                .map(id -> buildOrderResponse((String) id))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+    /**
+     * 특정 주문 ID를 포함한 오래된 순서대로 주문 데이터를 조회하는 메서드입니다.
+     */
+    public List<OrderResponseDTO> getOrdersByOrderId(String orderId) {
+        // 모든 상태의 ZSet에서 오래된 순서로 정렬된 데이터 가져오기
+        Set<Object> orderIds = redisTemplate.opsForZSet().range("orderTimestamps:all", 0, -1);
+
+        if (orderIds == null || orderIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 반환된 ID 중에서 특정 orderId만 필터링
+        return orderIds.stream()
+                .filter(id -> id.equals(orderId))
+                .map(id -> buildOrderResponse((String) id))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Redis 키를 기반으로 데이터를 오래된 순서대로 조회하는 공통 메서드.
+     */
+    private List<OrderResponseDTO> getOrders(String idFilter, String status, String keyType) {
+        String redisKey = "orderTimestamps:" + status; // ZSet 키 결정
+
+        // ZSet에서 오래된 순서대로 데이터 조회
+        Set<Object> orderIds = redisTemplate.opsForZSet().range(redisKey, 0, -1);
+
+        if (orderIds == null || orderIds.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 오래된 순서로 정렬된 데이터에서 ID 필터링 및 응답 빌드
+        return orderIds.stream()
+                .map(orderId -> buildOrderResponse((String) orderId)) // 주문 응답 빌드
+                .filter(order -> order != null && idFilter.equals(getFilterKey(order, keyType))) // ID 및 상태 필터링
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Redis 키를 기반으로 데이터를 다중 상태와 오래된 순서대로 조회하는 공통 메서드.
+     */
+    private List<OrderResponseDTO> getOrdersByMultipleStatuses(String idFilter, List<String> statuses, String keyType) {
+        return statuses.stream()
+                .flatMap(status -> getOrders(idFilter, status, keyType).stream()) // 상태별로 데이터 조회 후 합침
+                .sorted(Comparator.comparing(OrderResponseDTO::getOrderId)) // 정렬
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 사용자 ID와 배달중, 배달완료로 주문 데이터를 조회.
+     */
+    public List<OrderResponseDTO> getUserIdList(String userId) {
+        List<String> deliveryStatuses = Arrays.asList("배달중", "배달완료");
+        return getOrdersByMultipleStatuses(userId, deliveryStatuses, "USER");
+    }
+
+    /**
+     * 라이더 ID와 배달중, 배달완료로 주문 데이터를 조회.
+     */
+    public List<OrderResponseDTO> getRiderIdList(String riderId) {
+        List<String> deliveryStatuses = Arrays.asList("배달중", "배달완료");
+        return getOrdersByMultipleStatuses(riderId, deliveryStatuses, "RIDER");
+    }
+
+    /**
+     * 사용자 ID와 특정 상태로 주문 데이터를 조회.
+     */
+    public List<OrderResponseDTO> getOrdersByUserId(String userId, String status) {
+        return getOrders(userId, status, "USER");
+    }
+
+    /**
+     * 라이더 ID와 특정 상태로 주문 데이터를 조회.
+     */
+    public List<OrderResponseDTO> getDeliveriesByRiderId(String riderId, String status) {
+        return getOrders(riderId, status, "RIDER");
+    }
+
+    /**
+     * 필터링에 사용할 키 결정 메서드.
+     */
+    private String getFilterKey(OrderResponseDTO order, String keyType) {
+        return switch (keyType) {
+            case "USER" -> order.getUserId();
+            case "RIDER" -> order.getRiderId();
+            default -> throw new IllegalArgumentException("Invalid keyType: " + keyType);
+        };
     }
 
 
 
-    // 메시지 속성에서 안전하게 값을 가져오는 헬퍼 메소드 (디폴트 값 적용)
-    private String getAttributeValue(Map<String, MessageAttributeValue> attributes, String attributeName, String defaultValue) {
-        // 속성이 존재하지 않거나 null일 경우 디폴트 값 사용
-        MessageAttributeValue value = attributes.get(attributeName);
-        if (value == null || value.stringValue() == null) {
-            System.out.printf("속성 %s가 누락되었거나 null입니다. 디폴트 값 '%s'를 사용합니다.%n", attributeName, defaultValue);
-            return defaultValue;  // 디폴트 값 반환
-        }
-        return value.stringValue();
+    /**
+     * 특정 상태의 주문 데이터를 조회하는 메서드입니다.
+     */
+    public List<OrderResponseDTO> getDeliveriesByStatus(String statusFilter) {
+        Set<Object> orderIds = redisTemplate.opsForZSet().reverseRange("orderTimestamps:" + statusFilter, 0, -1);
+        return orderIds == null ? Collections.emptyList() : orderIds.stream()
+                .map(orderId -> buildOrderResponse((String) orderId))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
     }
 
-    // Redis에서 특정 상태 및 orderId로 주문 가져오기
-    public List<OrderResponseDTO> getOrderByStatusAndId(String statusFilter, String orderId) {
-        // 상태별 ZSet 키 생성
-        String zsetKey = "orderTimestamps:" + statusFilter;
 
-        // ZSet에서 orderId 존재 여부 확인
-        Double score = redisTemplate.opsForZSet().score(zsetKey, orderId);
-        if (score == null) {
-            return Collections.emptyList();  // 상태와 orderId가 일치하지 않으면 빈 리스트 반환
-        }
-
-        // Hash에서 status, messageBody, userId 가져오기
+    /**
+     * 주문 ID를 기반으로 OrderResponseDTO 객체를 생성하는 메서드입니다.
+     */
+    private OrderResponseDTO buildOrderResponse(String orderId) {
         String status = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, orderId);
         String messageBody = (String) redisTemplate.opsForHash().get(REDIS_ORDER_BODIES_KEY, orderId);
         String userId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_USER_IDS_KEY, orderId);
+        String riderId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_RIDER_IDS_KEY, orderId);
 
         if (status == null || messageBody == null || userId == null) {
-            return Collections.emptyList();  // 상태, 메시지 본문, 사용자 ID 중 하나라도 없으면 빈 리스트 반환
+            return null;
         }
 
-        // OrderResponseDTO로 변환
-        OrderResponseDTO order = OrderResponseDTO.builder()
+        return OrderResponseDTO.builder()
                 .orderId(orderId)
                 .status(status)
                 .messageBody(messageBody)
                 .userId(userId)
+                .riderId(riderId)
                 .build();
-
-        // 하나의 order만 반환하므로 List로 묶어서 반환
-        return List.of(order);
     }
-
-
-    // Redis에서 특정 orderId로 주문 가져오기
-    public List<OrderResponseDTO> getOrdersByOrderId(String orderId) {
-        List<OrderResponseDTO> orders = new ArrayList<>();
-
-        // Hash에서 해당 orderId에 대한 상태, 메시지 본문, 사용자 ID 가져오기
-        String status = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, orderId);
-        String messageBody = (String) redisTemplate.opsForHash().get(REDIS_ORDER_BODIES_KEY, orderId);
-        String userId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_USER_IDS_KEY, orderId);
-
-        if (status == null || messageBody == null || userId == null) {
-            return orders;  // 상태, 메시지 본문, 사용자 ID 중 하나라도 없으면 빈 리스트 반환
-        }
-
-        // toOrderResponseDTO 메서드를 사용하여 변환
-        OrderResponseDTO order = toOrderResponseDTO(orderId, status, messageBody, userId);
-        orders.add(order);  // 해당 orderId에 대한 주문을 리스트에 추가
-
-        return orders;  // orderId별로 그룹화된 주문 정보 반환
-    }
-
-
-
-
-    // Redis에서 특정 상태인 주문만 가져오기
-    public List<OrderResponseDTO> getDeliveriesByStatus(String statusFilter) {
-        Set<Object> orderIds = redisTemplate.opsForZSet().reverseRange("orderTimestamps:" + statusFilter, 0, -1);
-        if (orderIds == null || orderIds.isEmpty()) {
-            return Collections.emptyList();  // 빈 리스트 반환
-        }
-
-        // 각 주문에 대해 상태, 주문 ID, 메시지 본문, 사용자 ID를 가져와 리스트로 반환
-        return orderIds.stream().map(orderId -> {
-            String status = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, orderId);
-            String messageBody = (String) redisTemplate.opsForHash().get(REDIS_ORDER_BODIES_KEY, orderId);
-            String userId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_USER_IDS_KEY, orderId);
-
-            // 값이 하나라도 없으면 필터링
-            if (status != null && messageBody != null && userId != null) {
-                // OrderResponseDTO 객체로 변환하여 반환
-                 return toOrderResponseDTO((String) orderId, status, messageBody, userId);
-            }
-            return null;
-        }).filter(Objects::nonNull).collect(Collectors.toList());  // null 값을 필터링하여 반환
-    }
-
-    public List<OrderResponseDTO> getDeliveriesByRiderId(String riderId) {
-        // Redis에서 riderId에 해당하는 모든 주문 ID를 가져옴
-        Map<Object, Object> ordersByRider = redisTemplate.opsForHash().entries(REDIS_ORDER_RIDER_IDS_KEY);
-
-        // riderId에 매핑된 주문 ID들을 필터링
-        Set<Object> orderIds = ordersByRider.entrySet().stream()
-                .filter(entry -> riderId.equals(entry.getValue()))
-                .map(Map.Entry::getKey)
-                .collect(Collectors.toSet());
-
-        if (orderIds.isEmpty()) {
-            return Collections.emptyList();  // 빈 리스트 반환
-        }
-
-        // 각 주문에 대해 상태, 주문 ID, 메시지 본문, 사용자 ID를 가져와 리스트로 반환
-        return orderIds.stream().map(orderId -> {
-            String status = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, orderId);
-            String messageBody = (String) redisTemplate.opsForHash().get(REDIS_ORDER_BODIES_KEY, orderId);
-            String userId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_USER_IDS_KEY, orderId);
-
-            // 값이 하나라도 없으면 필터링
-            if (status != null && messageBody != null && userId != null) {
-                // OrderResponseDTO 객체로 변환하여 반환
-                return toOrderResponseDTO((String) orderId, status, messageBody, userId);
-            }
-            return null;
-        }).filter(Objects::nonNull).collect(Collectors.toList());  // null 값을 필터링하여 반환
-    }
-
-    // SQS 메시지 삭제
-    private void deleteMessage(String receiptHandle) {
-        DeleteMessageRequest request = DeleteMessageRequest.builder()
-                .queueUrl(queueUrl)
-                .receiptHandle(receiptHandle)
-                .build();
-
-        sqsClient.deleteMessage(request);
-        System.out.printf("Deleted SQS message with receipt handle: %s%n", receiptHandle);
-    }
-
-    // 메시지 속성 빌드
-    private Map<String, MessageAttributeValue> buildMessageAttributes(String status, String currentDateTime, String orderId, String userId,String riderId) {
-        return Map.of(
-                "status", MessageAttributeValue.builder().dataType("String").stringValue(status).build(),
-                "timestamp", MessageAttributeValue.builder().dataType("String").stringValue(currentDateTime).build(),
-                "orderId", MessageAttributeValue.builder().dataType("String").stringValue(orderId).build(),
-                "userId", MessageAttributeValue.builder().dataType("String").stringValue(userId).build(),  // userId 추가
-                "riderId", MessageAttributeValue.builder().dataType("String").stringValue(riderId).build()  // userId 추가
-        );
-    }
+    // 모든 주문 내역 가져오기
     public List<OrderResponseDTO> getAllOrders() {
         List<OrderResponseDTO> orders = new ArrayList<>();
 
         // 모든 orderId 가져오기
         Set<Object> orderIds = redisTemplate.opsForHash().keys(REDIS_ORDER_STATUSES_KEY);
-        if (orderIds == null || orderIds.isEmpty()) {
+        if (orderIds.isEmpty()) {
             return orders; // 주문이 없으면 빈 리스트 반환
         }
 
@@ -253,6 +340,7 @@ public class SQSService {
             String status = (String) redisTemplate.opsForHash().get(REDIS_ORDER_STATUSES_KEY, id);
             String messageBody = (String) redisTemplate.opsForHash().get(REDIS_ORDER_BODIES_KEY, id);
             String userId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_USER_IDS_KEY, id);
+            String riderId = (String) redisTemplate.opsForHash().get(REDIS_ORDER_RIDER_IDS_KEY, id);
 
             // 값이 하나라도 없으면 건너뜁니다
             if (status == null || messageBody == null || userId == null) {
@@ -265,6 +353,7 @@ public class SQSService {
                     .status(status)
                     .messageBody(messageBody)
                     .userId(userId)
+                    .riderId(riderId) // riderId 추가
                     .build();
 
             orders.add(order);
@@ -273,15 +362,8 @@ public class SQSService {
         return orders;  // OrderResponseDTO 리스트 반환
     }
 
-    public OrderResponseDTO toOrderResponseDTO(String orderId, String status, String messageBody, String userId) {
-        return OrderResponseDTO.builder()
-                .orderId(orderId)
-                .status(status)
-                .messageBody(messageBody)
-                .userId(userId)
-                .build();
+
+    public void deleteRedis() {
+        connectionFactory.getConnection().serverCommands().flushDb();
     }
-
 }
-
-

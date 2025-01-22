@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.sqs.model.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 @Service
 @RequiredArgsConstructor
@@ -65,7 +66,7 @@ public class ChatProducer {
             System.out.println("time"+timestamp);
             // Redis 키 생성
             String redisKey = "chat:" + orderId;
-
+            setRedisKeyExpiration(redisKey);
             // Redis에 저장 (타임스탬프와 함께 메시지 저장)
             ChatResponseDTO chatResponseDTO = ChatResponseDTO.builder()
                     .orderId(orderId)
@@ -116,4 +117,28 @@ public class ChatProducer {
                 .map(chatRequestDTO -> (Object) chatRequestDTO) // 반환 형식 맞추기
                 .toList();
     }
+    /**
+     * Redis 키의 만료 시간을 설정하는 메서드입니다.
+     * 기본적으로 1일로 설정됩니다.
+     */
+    private void setRedisKeyExpiration(String key) {
+        redisTemplate.expire(key, 1, TimeUnit.DAYS);
+    }
+    public void deleteChatMessagesFromRedis(String orderId) {
+        try {
+            // Redis에서 해당 orderId에 대한 채팅 메시지 삭제
+            String redisKey = "chat:" + orderId;
+
+            // 해당 채팅 메시지가 저장된 리스트 삭제
+            redisTemplate.delete(redisKey);
+
+            // 만약 Redis 키의 만료 시간도 설정한 경우, 만료 시간도 삭제되므로 별도의 만료 설정을 지울 필요는 없습니다.
+            // 만약 해당 키에 만료 시간 외에 추가적인 처리가 필요하다면, 해당 코드에서 확인할 수 있습니다.
+
+            System.out.printf("All chat messages for order %s have been deleted from Redis.%n", orderId);
+        } catch (Exception e) {
+            System.err.println("Error deleting chat messages for order " + orderId + ": " + e.getMessage());
+        }
+    }
+
 }
