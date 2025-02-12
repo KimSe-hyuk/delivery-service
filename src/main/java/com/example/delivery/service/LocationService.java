@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -73,4 +74,38 @@ public class LocationService {
                     .body(null);
         }
     }
+
+    public ResponseEntity<Map<String, Map<String, Double>>> getAllDeliveryLocations() {
+        Set<String> keys = redisTemplate.keys("delivery:location:*");
+        if (keys == null || keys.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(null);
+        }
+
+        Map<String, Map<String, Double>> allLocations = new HashMap<>();
+
+        for (String key : keys) {
+            String locationData = redisTemplate.opsForValue().get(key);
+            if (locationData != null) {
+                try {
+                    String[] latLng = locationData.split(",");
+                    if (latLng.length == 2) {
+                        double latitude = Double.parseDouble(latLng[0]);
+                        double longitude = Double.parseDouble(latLng[1]);
+
+                        Map<String, Double> location = new HashMap<>();
+                        location.put("latitude", latitude);
+                        location.put("longitude", longitude);
+
+                        String deliveryPersonId = key.replace("delivery:location:", "");
+                        allLocations.put(deliveryPersonId, location);
+                    }
+                } catch (Exception e) {
+                    // Handle errors if needed
+                }
+            }
+        }
+
+        return ResponseEntity.ok(allLocations);
+    }
+
 }

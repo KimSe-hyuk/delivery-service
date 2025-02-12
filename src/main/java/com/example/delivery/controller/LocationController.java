@@ -3,7 +3,6 @@ package com.example.delivery.controller;
 import com.example.delivery.dto.LocationRequestDTO;
 import com.example.delivery.service.LocationService;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -16,7 +15,7 @@ public class LocationController {
 
     private final LocationService locationService;
 
-        @PostMapping("/update-location")
+    @PostMapping("/update-location")
     public ResponseEntity<String> updateLocation(@RequestBody LocationRequestDTO locationRequestDTO) {
         System.out.println(locationRequestDTO);
         try {
@@ -29,10 +28,15 @@ public class LocationController {
         }
     }
     @GetMapping("/get-delivery-location")
-    public ResponseEntity<Map<String, Double>> getDeliveryLocation(@RequestParam String deliveryPersonId) {
+        public ResponseEntity<Map<String, Double>>  getDeliveryLocation(@RequestParam String deliveryPersonId){
+        System.out.println("delivery"+deliveryPersonId);
         if (deliveryPersonId == null || deliveryPersonId.isEmpty()) {
             return ResponseEntity.badRequest().body(null);
         }
         return locationService.getDeliveryLocation(deliveryPersonId);
+    }
+    @GetMapping("/get-all-delivery-location")
+    public ResponseEntity<Map<String, Map<String, Double>>> getAllDeliveryLocation(){
+        return locationService.getAllDeliveryLocations();
     }
 }

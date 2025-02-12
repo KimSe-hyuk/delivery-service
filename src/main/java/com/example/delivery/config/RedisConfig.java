@@ -19,4 +19,5 @@ public class RedisConfig {
         template.setValueSerializer(new StringRedisSerializer());  // ObjectSerializer로 변경할 수 있습니다.
         return template;
     }
+
 }

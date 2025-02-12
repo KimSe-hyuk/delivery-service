@@ -22,6 +22,7 @@ public class SQSController {
         if (riderId == null || riderId.isEmpty()) {
             riderId = "defaultRiderId";  // 기본값 설정
         }
+
         sqsService.sendMessage(orderRequestDTO.getUserId(), orderRequestDTO.getMessage(),orderRequestDTO.getStatus(),orderRequestDTO.getOrderId(),riderId);
         return "Message sent successfully for userId: " + orderRequestDTO.getUserId();
     }
@@ -41,10 +42,19 @@ public class SQSController {
     public List<OrderResponseDTO>  receiveUserIdMessages(@RequestParam String userId) {
         return sqsService.getUserIdList(userId);
     }
-
-    //라이더와  따른 내역 받기
+// 유저아이디  따른 갯수 내역 받기
+    @GetMapping("/userOrderCount")
+    public int  getUserOrderCount(@RequestParam String userId,@RequestParam String role) {
+        return sqsService.getUserOrderCount(userId,role);
+    }
+    // 유저아이디  따른 채팅리스트 갯수 내역 받기
+    @GetMapping("/userChatCount")
+    public int  getUserChatCount(@RequestParam String userId,@RequestParam String role) {
+        return sqsService.getUserChatCount(userId,role);
+    }
+    //라이더와 주문선택 따른 내역 받기
     @GetMapping("/getRiderOrdersList")
-    public List<OrderResponseDTO>  receiveRiderIdMessage(@RequestParam String riderId) {
+    public List<OrderResponseDTO>  receiveCountChatList(@RequestParam String riderId) {
         return sqsService.getRiderIdList(riderId);
     }
 
@@ -63,7 +73,7 @@ public class SQSController {
 
  // 특정 주문번호와 상태에 따른 내역 받기
     @GetMapping("/orderIdStatus")
-    public List<OrderResponseDTO> receiveOrderIdStatusMessages(@RequestParam String orderId, @RequestParam String status) {
+    public OrderResponseDTO receiveOrderIdStatusMessages(@RequestParam String orderId, @RequestParam String status) {
         return sqsService.getOrdersByStatusAndId(orderId,status);
     }
 
